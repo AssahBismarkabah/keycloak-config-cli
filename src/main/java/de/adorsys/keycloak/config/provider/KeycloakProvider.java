@@ -26,6 +26,8 @@ import de.adorsys.keycloak.config.exception.KeycloakProviderException;
 import de.adorsys.keycloak.config.properties.KeycloakConfigProperties;
 import de.adorsys.keycloak.config.util.ResteasyUtil;
 import de.adorsys.keycloak.config.util.VersionUtil;
+import de.adorsys.keycloak.config.util.resteasy.ClientAssertionFilter;
+import de.adorsys.keycloak.config.util.resteasy.FileClientAssertionProvider;
 import dev.failsafe.Failsafe;
 import dev.failsafe.RetryPolicy;
 import org.jboss.resteasy.client.jaxrs.ResteasyClient;
@@ -46,6 +48,8 @@ import java.net.URI;
 import java.net.URISyntaxException;
 import java.text.MessageFormat;
 import java.time.Duration;
+import java.util.Collection;
+import java.util.List;
 import java.util.function.Supplier;
 
 import jakarta.ws.rs.WebApplicationException;
@@ -88,6 +92,11 @@ public class KeycloakProvider implements AutoCloseable {
         if (keycloak == null || resteasyClient == null || keycloak.isClosed() || resteasyClient.isClosed()) {
             resteasyClient = resteasyClientSupplier.get();
             resteasyClient.register(JacksonProvider.class);
+            if (properties.hasClientAssertionFile()) {
+                resteasyClient.register(new ClientAssertionFilter(
+                        new FileClientAssertionProvider(properties.getClientAssertionFile()),
+                        properties.getUrl(), properties.getLoginRealm()));
+            }
             keycloak = createKeycloak();
 
             checkServerVersion();
@@ -140,7 +149,7 @@ public class KeycloakProvider implements AutoCloseable {
     }
 
     /**
-     * Definitive detection for Keycloak FGAP V2 (admin-fine-grained-authz:v2).
+     * Definitive detection for Keycloak FGAP V2 (ADMIN_FINE_GRAINED_AUTHZ_V2).
      * Uses server info profile features to determine whether FGAP V2 is active.
      * Result is cached in {@link #fgapV2Active}.
      * Returns false if detection fails.
@@ -178,29 +187,33 @@ public class KeycloakProvider implements AutoCloseable {
                 return fgapV2Active;
             }
 
-            java.util.List<String> disabled = profile.getDisabledFeatures();
-            java.util.List<String> preview = profile.getPreviewFeatures();
-            java.util.List<String> experimental = profile.getExperimentalFeatures();
+            List<String> disabled = profile.getDisabledFeatures();
+            List<String> preview = profile.getPreviewFeatures();
+            List<String> experimental = profile.getExperimentalFeatures();
+
+            // Using string names for backwards compability. See full list of feature names in:
+            // https://github.com/keycloak/keycloak/blob/main/common/src/main/java/org/keycloak/common/Profile.java
+            final String fgapV1 = "ADMIN_FINE_GRAINED_AUTHZ";
+            final String fgapV2 = "ADMIN_FINE_GRAINED_AUTHZ_V2";
 
             // If v2 is explicitly disabled, it's not active
-            if (disabled != null && disabled.contains("admin-fine-grained-authz:v2")) {
+            if (containsFeature(disabled, fgapV2)) {
                 fgapV2Active = false;
-                logger.debug("Detected admin-fine-grained-authz:v2 in disabled features => FGAP V2 not active");
+                logger.debug("Detected {} in disabled features => FGAP V2 not active", fgapV2);
                 return fgapV2Active;
             }
 
             // If v1 is present in preview/experimental, v1 is still in use -> V2 not active
-            if ((preview != null && preview.contains("admin-fine-grained-authz:v1"))
-                    || (experimental != null && experimental.contains("admin-fine-grained-authz:v1"))) {
+            if (containsFeature(preview, fgapV1) || containsFeature(experimental, fgapV1)) {
                 fgapV2Active = false;
                 logger.debug(
-                        "Detected admin-fine-grained-authz:v1 in preview/experimental features => FGAP V2 not active");
+                        "Detected {} in preview/experimental features => FGAP V2 not active", fgapV1);
                 return fgapV2Active;
             }
 
             // Otherwise, assume V2 is active (Keycloak 26.2+ defaults to V2)
             fgapV2Active = true;
-            logger.debug("Keycloak version {} with no V1/disabled V2 detected - FGAP V2 is active", keycloakVersion);
+            logger.debug("Keycloak version {} with no V1/disabled V2 detected => FGAP V2 is active", keycloakVersion);
             return fgapV2Active;
         } catch (Exception e) {
             logger.warn("Unable to detect FGAP V2 from server info: {}", e.getMessage());
@@ -209,6 +222,12 @@ public class KeycloakProvider implements AutoCloseable {
     }
 
     public void refreshToken() {
+        // With a pre-acquired bearer token there is no refresh token to use.
+        // The caller is responsible for supplying a token that lives long
+        // enough to cover the run.
+        if (properties.hasAuthorization()) {
+            return;
+        }
         getInstance().tokenManager().refreshToken();
     }
 
@@ -279,21 +298,35 @@ public class KeycloakProvider implements AutoCloseable {
 
     private Keycloak getKeycloak() {
         Keycloak keycloakInstance = getKeycloakInstance(properties.getUrl());
-        keycloakInstance.tokenManager().getAccessToken();
+        // When a pre-acquired bearer token is supplied, there is no token
+        // endpoint round-trip to perform — the token is injected via the
+        // Authorization header by the underlying admin-client. Calling
+        // tokenManager().getAccessToken() would attempt a grant-type login.
+        if (!properties.hasAuthorization()) {
+            keycloakInstance.tokenManager().getAccessToken();
+        }
 
         return keycloakInstance;
     }
 
     private Keycloak getKeycloakInstance(String serverUrl) {
-        return KeycloakBuilder.builder()
+        KeycloakBuilder builder = KeycloakBuilder.builder()
                 .serverUrl(serverUrl)
                 .realm(properties.getLoginRealm())
                 .clientId(properties.getClientId())
+                .resteasyClient(resteasyClient);
+
+        if (properties.hasAuthorization()) {
+            // Bearer token supplied externally (e.g. acquired via browser
+            // login by the caller). Bypass the grant-type flow entirely.
+            return builder.authorization(properties.getAuthorization()).build();
+        }
+
+        return builder
                 .grantType(properties.getGrantType())
-                .clientSecret(properties.getClientSecret())
+                .clientSecret(properties.hasClientAssertionFile() ? null : properties.getClientSecret())
                 .username(properties.getUser())
                 .password(properties.getPassword())
-                .resteasyClient(resteasyClient)
                 .build();
     }
 
@@ -361,6 +394,12 @@ public class KeycloakProvider implements AutoCloseable {
      * returns 204 if successful, 400 if not with a json error response.
      */
     private void logout() {
+        // With a pre-acquired bearer token kcc owns no session to terminate;
+        // the token lifecycle is managed by the caller.
+        if (properties.hasAuthorization()) {
+            return;
+        }
+
         String refreshToken = this.keycloak.tokenManager().getAccessToken().getRefreshToken();
         // if we do not have a refreshToken, we are not able ot logout
         // (grant_type=client_credentials)
@@ -375,11 +414,13 @@ public class KeycloakProvider implements AutoCloseable {
         Form form = new Form();
         form.param("refresh_token", refreshToken);
 
-        if (!properties.getClientId().isEmpty() && properties.getClientSecret().isEmpty()) {
+        if (!properties.hasClientAssertionFile()
+                && !properties.getClientId().isEmpty() && properties.getClientSecret().isEmpty()) {
             form.param("client_id", properties.getClientId());
         }
 
-        if (!properties.getClientId().isEmpty() && !properties.getClientSecret().isEmpty()) {
+        if (!properties.hasClientAssertionFile()
+                && !properties.getClientId().isEmpty() && !properties.getClientSecret().isEmpty()) {
             resteasyWebTarget.register(new BasicAuthentication(properties.getClientId(), properties.getClientSecret()));
         }
 
@@ -401,6 +442,20 @@ public class KeycloakProvider implements AutoCloseable {
         return properties.getUrl();
     }
 
+    /**
+     * Returns the raw bearer token currently in use. When configured via
+     * {@code keycloak.authorization}, returns that token verbatim — the
+     * property must be supplied without a {@code Bearer } prefix. Otherwise
+     * delegates to the underlying admin-client's token manager, triggering
+     * a login if needed.
+     */
+    public String getAccessTokenString() {
+        if (properties.hasAuthorization()) {
+            return properties.getAuthorization();
+        }
+        return getInstance().tokenManager().getAccessToken().getToken();
+    }
+
     /*
      * Matches the official Keycloak admin-client JacksonProvider implementation:
      * https://github.com/keycloak/keycloak/blob/main/integration/admin-client/src/main/java/org/keycloak/admin/client/JacksonProvider.java
@@ -417,5 +472,17 @@ public class KeycloakProvider implements AutoCloseable {
             objectMapper.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
             return objectMapper;
         }
+    }
+
+    /**
+     * Check if the given {@code names} collection isn't {@code null} and contains the given
+     * {@code feature}.
+     *
+     * @param names collection of feature names
+     * @param feature feature to find from the collection
+     * @return {@code true} if the collection contains the feature
+     */
+    private static boolean containsFeature(Collection<String> names, String feature) {
+        return names != null && names.contains(feature);
     }
 }

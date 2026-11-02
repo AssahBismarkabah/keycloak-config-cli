@@ -7,6 +7,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 ## [Unreleased]
 
 ### Added
+- Support signed JWT client assertions, including federated assertions from Kubernetes service accounts.
+- Add `keycloak.authorization` property to pass a pre-acquired bearer token (raw, without `Bearer ` prefix), bypassing the grant-type login flow. No token refresh is attempted, so the token must remain valid for the entire run.
+- Support for Keycloak 26.7.4 to fix [#1666](https://github.com/adorsys/keycloak-config-cli/issues/1666)
+
+### Fixed
+- Fix importing duplicate sub-flow authenticators when only the new execution has an authenticator config [#1671](https://github.com/adorsys/keycloak-config-cli/issues/1671)
+- Fix Keycloak FGAP version detection using wrong feature names [#1610](https://github.com/adorsys/keycloak-config-cli/issues/1610)
+- Fix `organizations` being silently ignored on Keycloak 26.4+. The `pre-keycloak26-6` Maven profile was `activeByDefault` and excluded the organization support classes (`OrganizationRepository`, `OrganizationImportService`) from compilation, so images built against Keycloak >= 26.4 shipped without organization support and dropped the `organizations` section with only a DEBUG log line. The organization classes now compile against the default admin client and are part of every build; compatibility profiles are activated explicitly per CI matrix entry (no more `activeByDefault`), and a warning is logged when an import declares organizations that cannot be applied [#1655](https://github.com/adorsys/keycloak-config-cli/issues/1655)
+- Fix `$${javascript: ...}` expressions returning arrays or objects failing with `The Context is already closed` [#1653](https://github.com/adorsys/keycloak-config-cli/issues/1653)
+- Fix organization import erasing the Keycloak 26.8 domain routing (`identityProviderAlias`, `autoRedirect`) on every run and failing to create an organization with a routed domain. Identity providers are now linked before the organization is updated, routing not declared in the import is kept, and an empty `identityProviderAlias` removes it [#1691](https://github.com/adorsys/keycloak-config-cli/issues/1691)
+- Fix `Unrecognized field "types"` when importing or normalizing identity providers exported from Keycloak 26.5+ (`keycloak-client-common-synced` is now pinned to `keycloak.client.version` instead of the older version from the Keycloak BOM) [#1665](https://github.com/adorsys/keycloak-config-cli/issues/1665)
+
+## [6.5.1] - 2026-05-22
+
+### Added
 - Add support for x509 client certificate authentication (mTLS) via `keycloak.tls.*` properties [#959](https://github.com/adorsys/keycloak-config-cli/issues/959)
 - Add missing Keycloak baseline configurations for versions 21.1.2, 22.0.5, 26.1.0, 26.4.0, 26.5.5, and 26.5.7 [#1568](https://github.com/adorsys/keycloak-config-cli/issues/1568)
 
@@ -965,14 +980,14 @@ A lot of import properties are added over the years. this major release of keycl
 <!-- @formatter:off -->
 
 
-[Unreleased]: https://github.com/adorsys/keycloak-config-cli/compare/v6.2.1...HEAD
 
-[Unreleased]: https://github.com/adorsys/keycloak-config-cli/compare/v6.5.0...HEAD
+
+[Unreleased]: https://github.com/adorsys/keycloak-config-cli/compare/v6.5.1...HEAD
+[6.5.1]: https://github.com/adorsys/keycloak-config-cli/compare/v6.5.0...v6.5.1
 [6.5.0]: https://github.com/adorsys/keycloak-config-cli/compare/v6.4.1...v6.5.0
 [6.4.1]: https://github.com/adorsys/keycloak-config-cli/compare/v6.4.0...v6.4.1
 [6.4.0]: https://github.com/adorsys/keycloak-config-cli/compare/v6.3.0...v6.4.0
 [6.3.0]: https://github.com/adorsys/keycloak-config-cli/compare/v6.2.1...v6.3.0
-
 [6.2.1]: https://github.com/adorsys/keycloak-config-cli/compare/v6.2.0...v6.2.1
 [6.2.0]: https://github.com/adorsys/keycloak-config-cli/compare/vFixed...v6.2.0
 [Fixed]: https://github.com/adorsys/keycloak-config-cli/compare/v6.1.11...vFixed
